@@ -16,6 +16,7 @@ type Cache struct {
 	expiryQ   ExpiryQueue
 }
 
+// Keys returns the keys in the cache in sorted order.
 func (c *Cache) Keys() []string {
 	keys := make([]string, 0, len(c.table))
 	for k := range c.table {
@@ -25,6 +26,7 @@ func (c *Cache) Keys() []string {
 	return keys
 }
 
+// NewCache creates a new priority expiry LRU cache.
 func NewCache(maxItems int) *Cache {
 	var priorityQ PriorityQueue
 	heap.Init(&priorityQ)
@@ -38,6 +40,10 @@ func NewCache(maxItems int) *Cache {
 	}
 }
 
+// Get returns the value for the key or -1 if:
+//
+// 1. the key does not exists in the cache
+// 2. the item is already expired
 func (c *Cache) Get(key string) int {
 	item, ok := c.table[key]
 	if ok {
@@ -50,7 +56,11 @@ func (c *Cache) Get(key string) int {
 	return -1
 }
 
+// Set sets the new value for the key, with priority and expire time in seconds.
 func (c *Cache) Set(key string, value, priority, expire int) {
+	// Create a brand new item and insert it to all three field,
+	// table, priorityQ, expiryQ.  This way, we don't need to
+	// call the heap.Fix operation, which is O(log n) runtime.
 	expireDuration := time.Duration(expire) * time.Second
 	item := Item{
 		key:      key,
@@ -65,17 +75,23 @@ func (c *Cache) Set(key string, value, priority, expire int) {
 	c.evictItems()
 }
 
+// SetMaxItems update the maximum value.
+//
+// It evicts items in case the actual cache size is more than
+// the maximum value.
 func (c *Cache) SetMaxItems(maxItems int) {
 	c.maxItems = maxItems
 	c.evictItems()
 }
 
+// evictItems will evict items from the cache to make room for new ones.
 func (c *Cache) evictItems() {
+	// Cache has a capacity, do nothing.
 	if len(c.table) <= c.maxItems {
 		return
 	}
 
-	// Expired time based eviction.
+	// Evicts expired items first, if any.
 	for c.expiryQ.Len() > 0 {
 		got := heap.Pop(&c.expiryQ).(*Item)
 		if got == nil {
@@ -84,7 +100,8 @@ func (c *Cache) evictItems() {
 		}
 		item, ok := c.table[got.key]
 		if !ok {
-			// The item is already evicted.
+			// The item is already evicted based on the
+			// priority.
 			continue
 		}
 		if !got.Equal(item) {
@@ -104,20 +121,25 @@ func (c *Cache) evictItems() {
 		}
 	}
 
-	// Priority based eviction.
+	// Evicts items based on the priority.
+	//
+	// Evicts LRU, Least Recent Updated, items in case of the same
+	// priority.
 	for c.priorityQ.Len() > 0 {
 		got := heap.Pop(&c.priorityQ).(*Item)
 		if got == nil {
-			// sanity check
+			// This shouldn't happen but, just sanity check
 			break
 		}
 		item, ok := c.table[got.key]
 		if !ok {
-			// The item is already evicted.
+			// The item is already evicted based on the
+			// expiration time.
 			continue
 		}
 		if !got.Equal(item) {
-			// Ignore the stale item in the queue.
+			// The item had been updated by Set() API.
+			// ignore the item in the queue.
 			continue
 		}
 		delete(c.table, item.key)
