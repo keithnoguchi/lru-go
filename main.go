@@ -49,6 +49,9 @@ func (c *Cache) Get(key string) int {
 	if ok {
 		if time.Now().Before(item.expire) {
 			item.access = time.Now()
+			// Priority queue could be affected by the
+			// updated access time for the LRU operation.
+			heap.Fix(&c.priorityQ, item.priorityIndex)
 			return item.value
 		}
 		delete(c.table, key)
@@ -58,20 +61,29 @@ func (c *Cache) Get(key string) int {
 
 // Set sets the new value for the key, with priority and expire time in seconds.
 func (c *Cache) Set(key string, value, priority, expire int) {
-	// Create a brand new item and insert it to all three field,
-	// table, priorityQ, expiryQ.  This way, we don't need to
-	// call the heap.Fix operation, which is O(log n) runtime.
-	expireDuration := time.Duration(expire) * time.Second
-	item := Item{
-		key:      key,
-		value:    value,
-		priority: priority,
-		expire:   time.Now().Add(expireDuration),
-		access:   time.Now(),
+	accessTime := time.Now()
+	expireTime := accessTime.Add(time.Duration(expire) * time.Second)
+	if item := c.table[key]; item != nil {
+		item.value = value
+		item.priority = priority
+		item.access = accessTime
+		heap.Fix(&c.priorityQ, item.priorityIndex)
+		if item.expire != expireTime {
+			item.expire = expireTime
+			heap.Fix(&c.expiryQ, item.expiryIndex)
+		}
+	} else {
+		item := Item{
+			key:      key,
+			value:    value,
+			priority: priority,
+			expire:   expireTime,
+			access:   accessTime,
+		}
+		c.table[key] = &item
+		heap.Push(&c.priorityQ, &item)
+		heap.Push(&c.expiryQ, &item)
 	}
-	c.table[key] = &item
-	heap.Push(&c.priorityQ, &item)
-	heap.Push(&c.expiryQ, &item)
 	c.evictItems()
 }
 
@@ -93,27 +105,29 @@ func (c *Cache) evictItems() {
 
 	// Evicts expired items first, if any.
 	for c.expiryQ.Len() > 0 {
-		got := heap.Pop(&c.expiryQ).(*Item)
+		// Peak the candidate eviction item.
+		got := c.expiryQ[0]
 		if got == nil {
 			// This shouldn't happen but just in case.
 			break
 		}
 		item, ok := c.table[got.key]
 		if !ok {
-			// The item is already evicted based on the
-			// priority.
-			continue
-		}
-		if !got.Equal(item) {
-			// Ignore the stale item in the queue.
+			// The item is already evicted.  This could be
+			// through the proirity based eviction.
+			//
+			// Remove it from the expiry queue and try the
+			// next one.
+			heap.Pop(&c.expiryQ)
 			continue
 		}
 		if item.expire.After(time.Now()) {
 			// No more expired items, try the priority based
 			// eviction next.
-			heap.Push(&c.expiryQ, item)
 			break
 		}
+		// Evict the item.
+		heap.Pop(&c.expiryQ)
 		delete(c.table, item.key)
 		if len(c.table) <= c.maxItems {
 			// done.
@@ -127,19 +141,10 @@ func (c *Cache) evictItems() {
 	// priority.
 	for c.priorityQ.Len() > 0 {
 		got := heap.Pop(&c.priorityQ).(*Item)
-		if got == nil {
-			// This shouldn't happen but, just sanity check
-			break
-		}
 		item, ok := c.table[got.key]
 		if !ok {
-			// The item is already evicted based on the
-			// expiration time.
-			continue
-		}
-		if !got.Equal(item) {
-			// The item had been updated by Set() API.
-			// ignore the item in the queue.
+			// The item is already evicted.  This could be
+			// through the expiry based eviction.
 			continue
 		}
 		delete(c.table, item.key)
@@ -152,67 +157,76 @@ func (c *Cache) evictItems() {
 
 // Item holds the value and metadata.
 type Item struct {
-	key      string
-	value    int
-	priority int
-	access   time.Time
-	expire   time.Time
-}
-
-// Equal checks the item value and the metadata except the access time.
-func (i *Item) Equal(j *Item) bool {
-	if i.key != j.key {
-		return false
-	}
-	if i.value != j.value {
-		return false
-	}
-	if i.priority != j.priority {
-		return false
-	}
-	if i.expire != j.expire {
-		return false
-	}
-	return true
+	key           string
+	value         int
+	priority      int
+	access        time.Time
+	expire        time.Time
+	priorityIndex int
+	expiryIndex   int
 }
 
 // https://pkg.go.dev/container/heap#example-package-PriorityQueue
-type BaseQueue []*Item
-type ExpiryQueue struct {
-	BaseQueue
-}
-type PriorityQueue struct {
-	BaseQueue
-}
+type ExpiryQueue []*Item
 
-func (pq BaseQueue) Len() int { return len(pq) }
-func (pq BaseQueue) Swap(i, j int) {
-	pq[i], pq[j] = pq[j], pq[i]
+func (pq ExpiryQueue) Len() int { return len(pq) }
+func (pq ExpiryQueue) Less(i, j int) bool {
+	// To pop the oldest expire time item first.
+	return pq[i].expire.Before(pq[j].expire)
 }
-func (pq *BaseQueue) Push(x any) {
+func (pq ExpiryQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].expiryIndex = i
+	pq[j].expiryIndex = j
+}
+func (pq *ExpiryQueue) Push(x any) {
+	n := len(*pq)
 	item := x.(*Item)
+	item.expiryIndex = n
 	*pq = append(*pq, item)
 }
-func (pq *BaseQueue) Pop() any {
+func (pq *ExpiryQueue) Pop() any {
 	old := *pq
 	n := len(old)
 	item := old[n-1]
 	old[n-1] = nil
+	item.expiryIndex = -1
 	*pq = old[0 : n-1]
 	return item
 }
-func (pq ExpiryQueue) Less(i, j int) bool {
-	// To pop the oldest expire time item first.
-	return pq.BaseQueue[i].expire.Before(pq.BaseQueue[j].expire)
-}
+
+// Priority with LRU based priority queue.
+type PriorityQueue []*Item
+
+func (pq PriorityQueue) Len() int { return len(pq) }
 func (pq PriorityQueue) Less(i, j int) bool {
 	// To pop the lowest priority item first.
-	if pq.BaseQueue[i].priority == pq.BaseQueue[j].priority {
-		// Use the LRU logic for the same priority items.
-		return pq.BaseQueue[i].access.Before(pq.BaseQueue[j].access)
+	if pq[i].priority == pq[j].priority {
+		// Pick the LRU item.
+		return pq[i].access.Before(pq[j].access)
 	} else {
-		return pq.BaseQueue[i].priority < pq.BaseQueue[j].priority
+		return pq[i].priority < pq[j].priority
 	}
+}
+func (pq PriorityQueue) Swap(i, j int) {
+	pq[i], pq[j] = pq[j], pq[i]
+	pq[i].priorityIndex = i
+	pq[j].priorityIndex = j
+}
+func (pq *PriorityQueue) Push(x any) {
+	n := len(*pq)
+	item := x.(*Item)
+	item.priorityIndex = n
+	*pq = append(*pq, item)
+}
+func (pq *PriorityQueue) Pop() any {
+	old := *pq
+	n := len(old)
+	item := old[n-1]
+	old[n-1] = nil
+	item.priorityIndex = -1
+	*pq = old[0 : n-1]
+	return item
 }
 
 func main() {
@@ -225,18 +239,18 @@ func main() {
 	c.Get("C")
 
 	c.SetMaxItems(5)
-	fmt.Println(c.Keys())
+	fmt.Println(c.Keys()) // [A B C D E]
 
 	time.Sleep(5 * time.Second)
 	c.SetMaxItems(4)
-	fmt.Println(c.Keys())
+	fmt.Println(c.Keys()) // [A C D E]
 
 	c.SetMaxItems(3)
-	fmt.Println(c.Keys())
+	fmt.Println(c.Keys()) // [A C E]
 
 	c.SetMaxItems(2)
-	fmt.Println(c.Keys())
+	fmt.Println(c.Keys()) // [C E]
 
 	c.SetMaxItems(1)
-	fmt.Println(c.Keys())
+	fmt.Println(c.Keys()) // [C]
 }
