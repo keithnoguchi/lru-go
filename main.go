@@ -1,4 +1,4 @@
-// A LRU cache in Golang.
+// A priority expiry LRU cache.
 package main
 
 import (
