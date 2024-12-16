@@ -33,24 +33,16 @@ func NewCache(maxItems int) *Cache {
 	return &Cache{
 		maxItems:  maxItems,
 		table:     make(map[string]*Item),
-		expiryQ:   expiryQ,
 		priorityQ: priorityQ,
+		expiryQ:   expiryQ,
 	}
-}
-
-// Item holds the value with metadata.
-type Item struct {
-	key      string
-	value    int
-	priority int
-	access   time.Time
-	expire   time.Time
 }
 
 func (c *Cache) Get(key string) int {
 	item, ok := c.table[key]
 	if ok {
-		if item.expire.After(time.Now()) {
+		if time.Now().Before(item.expire) {
+			item.access = time.Now()
 			return item.value
 		}
 		delete(c.table, key)
@@ -59,15 +51,17 @@ func (c *Cache) Get(key string) int {
 }
 
 func (c *Cache) Set(key string, value, priority, expire int) {
-	duration := time.Duration(expire) * time.Second
+	expireDuration := time.Duration(expire) * time.Second
 	item := Item{
 		key:      key,
 		value:    value,
 		priority: priority,
-		expire:   time.Now().Add(duration),
+		expire:   time.Now().Add(expireDuration),
 		access:   time.Now(),
 	}
 	c.table[key] = &item
+	heap.Push(&c.priorityQ, &item)
+	heap.Push(&c.expiryQ, &item)
 	c.evictItems()
 }
 
@@ -77,6 +71,59 @@ func (c *Cache) SetMaxItems(maxItems int) {
 }
 
 func (c *Cache) evictItems() {
+	if len(c.table) < c.maxItems {
+		return
+	}
+
+	// Expired time based eviction.
+	for c.expiryQ.Len() > 0 && len(c.table) > c.maxItems {
+		got := c.expiryQ.BaseQueue[0]
+		if got == nil {
+			// This shouldn't happen but just in case.
+			break
+		}
+		item, ok := c.table[got.key]
+		if !ok {
+			// The item is already evicted.
+			continue
+		}
+		if !got.Equal(item) {
+			// Ignore the stale item in the queue.
+			continue
+		}
+		if item.expire.After(time.Now()) {
+			// No more expired item, try the next one.
+			break
+		}
+		heap.Pop(&c.expiryQ)
+		delete(c.table, got.key)
+	}
+}
+
+// Item holds the value and metadata.
+type Item struct {
+	key      string
+	value    int
+	priority int
+	access   time.Time
+	expire   time.Time
+}
+
+// Equal checks the item value and the metadata except the access time.
+func (i *Item) Equal(j *Item) bool {
+	if i.key != j.key {
+		return false
+	}
+	if i.value != j.value {
+		return false
+	}
+	if i.priority != j.priority {
+		return false
+	}
+	if i.expire != j.expire {
+		return false
+	}
+	return true
 }
 
 // https://pkg.go.dev/container/heap#example-package-PriorityQueue
@@ -125,7 +172,7 @@ func main() {
 	c.SetMaxItems(5)
 	fmt.Println(c.Keys())
 
-	time.Sleep(5)
+	time.Sleep(5 * time.Second)
 	c.SetMaxItems(4)
 	fmt.Println(c.Keys())
 
