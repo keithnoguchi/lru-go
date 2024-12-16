@@ -71,13 +71,13 @@ func (c *Cache) SetMaxItems(maxItems int) {
 }
 
 func (c *Cache) evictItems() {
-	if len(c.table) < c.maxItems {
+	if len(c.table) <= c.maxItems {
 		return
 	}
 
 	// Expired time based eviction.
-	for c.expiryQ.Len() > 0 && len(c.table) > c.maxItems {
-		got := c.expiryQ.BaseQueue[0]
+	for c.expiryQ.Len() > 0 {
+		got := heap.Pop(&c.expiryQ).(*Item)
 		if got == nil {
 			// This shouldn't happen but just in case.
 			break
@@ -92,11 +92,39 @@ func (c *Cache) evictItems() {
 			continue
 		}
 		if item.expire.After(time.Now()) {
-			// No more expired item, try the next one.
+			// No more expired items, try the priority based
+			// eviction next.
+			heap.Push(&c.expiryQ, item)
 			break
 		}
-		heap.Pop(&c.expiryQ)
-		delete(c.table, got.key)
+		delete(c.table, item.key)
+		if len(c.table) <= c.maxItems {
+			// done.
+			return
+		}
+	}
+
+	// Priority based eviction.
+	for c.priorityQ.Len() > 0 {
+		got := heap.Pop(&c.priorityQ).(*Item)
+		if got == nil {
+			// sanity check
+			break
+		}
+		item, ok := c.table[got.key]
+		if !ok {
+			// The item is already evicted.
+			continue
+		}
+		if !got.Equal(item) {
+			// Ignore the stale item in the queue.
+			continue
+		}
+		delete(c.table, item.key)
+		if len(c.table) <= c.maxItems {
+			// done.
+			return
+		}
 	}
 }
 
@@ -157,7 +185,12 @@ func (pq ExpiryQueue) Less(i, j int) bool {
 }
 func (pq PriorityQueue) Less(i, j int) bool {
 	// To pop the lowest priority item first.
-	return pq.BaseQueue[i].priority < pq.BaseQueue[j].priority
+	if pq.BaseQueue[i].priority == pq.BaseQueue[j].priority {
+		// Use the LRU logic for the same priority items.
+		return pq.BaseQueue[i].access.Before(pq.BaseQueue[j].access)
+	} else {
+		return pq.BaseQueue[i].priority < pq.BaseQueue[j].priority
+	}
 }
 
 func main() {
