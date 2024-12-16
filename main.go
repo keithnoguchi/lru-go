@@ -3,6 +3,8 @@ package main
 
 import (
 	"container/heap"
+	"fmt"
+	"sort"
 	"time"
 )
 
@@ -12,6 +14,15 @@ type Cache struct {
 	table     map[string]*Item
 	priorityQ PriorityQueue
 	expiryQ   ExpiryQueue
+}
+
+func (c *Cache) Keys() []string {
+	keys := make([]string, 0, len(c.table))
+	for k := range c.table {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func NewCache(maxItems int) *Cache {
@@ -104,5 +115,26 @@ func (pq PriorityQueue) Less(i, j int) bool {
 
 func main() {
 	c := NewCache(5)
+	c.Set("A", 1, 5, 100)
+	c.Set("B", 2, 15, 3)
+	c.Set("C", 3, 5, 10)
+	c.Set("D", 4, 1, 15)
+	c.Set("E", 5, 5, 150)
+	c.Get("C")
+
 	c.SetMaxItems(5)
+	fmt.Println(c.Keys())
+
+	time.Sleep(5)
+	c.SetMaxItems(4)
+	fmt.Println(c.Keys())
+
+	c.SetMaxItems(3)
+	fmt.Println(c.Keys())
+
+	c.SetMaxItems(2)
+	fmt.Println(c.Keys())
+
+	c.SetMaxItems(1)
+	fmt.Println(c.Keys())
 }
